@@ -1,0 +1,48 @@
+[tool.poetry]
+name = "nessus-py"
+version = "1.0.0"
+description = "Nessus API for Python"
+authors = ["karrni <karrni@proton.me>"]
+readme = "README.md"
+packages = [
+    { include = "nessus" },
+]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+requests = "^2.31.0"
+defusedxml = "^0.7.1"
+urllib3 = "^2.0.6"
+
+[tool.poetry.group.dev.dependencies]
+black = "^23.9.1"
+isort = "^5.12.0"
+ruff = "^0.0.292"
+deptry = "^0.12.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length=119
+output-format="grouped"
+select = [
+    "E",  # pycodestyle, error
+    "F",  # Pyflakes
+    "UP",  # pyupgrade
+    "B",  # flake8-bugbear
+    "S",  # flake8-bandit
+    "C4",  # flake8-comprehensions
+    "ISC",  # flake8-implicit-str-concat
+    "ICN",  # flake8-import-conventions
+    "PTH",  # flake8-use-pathlib
+    "RUF",  # Ruff-specific rules
+]
+
+[tool.black]
+line-length = 119
+
+[tool.isort]
+profile = "black"
+line_length = 119

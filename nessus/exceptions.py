@@ -1,0 +1,2 @@
+class NessusException(Exception):
+    pass
