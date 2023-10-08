@@ -392,6 +392,9 @@ class NessusAPI:
 
     # --- Policies ---
 
+    def get_policies(self) -> Union[list[dict], None]:
+        return self.policies_list()["policies"]
+
     def get_policy_uuid(self, policy_id: int) -> str:
         return self.policies_details(policy_id)["uuid"]
 
