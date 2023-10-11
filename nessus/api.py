@@ -1,6 +1,7 @@
 import logging
 import re
 import time
+from dataclasses import asdict
 from io import BytesIO
 from json import JSONDecodeError
 from typing import IO, Union
@@ -10,7 +11,7 @@ import requests
 
 from .exceptions import NessusException
 from .export import NessusScanExport
-from .types import TemplateType
+from .models import ScanCreateSettings
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ class NessusAPI:
         if not match:
             raise NessusException("Couldn't parse API token from nessus6.js")
 
-        self._session.headers["X-Cookie"] = match.group(1)
+        self._session.headers["X-API-Token"] = match.group(1)
 
     # ==============================
     #         AUTHENTICATION
@@ -115,6 +116,11 @@ class NessusAPI:
         if check_auth:
             self._check_authentication()
 
+        # Log only the keys of params and data
+        _params = list(params.keys()) if params else None
+        _data = list(data.keys()) if data else None
+        logger.debug(f"{method} {path}, params={_params} data={_data}")
+
         url = urljoin(self.url, path)
 
         # Set the content type to JSON if the request 'is_json', no files are
@@ -143,29 +149,25 @@ class NessusAPI:
         return response.json()
 
     def _get(self, path: str, **kwargs):
-        logger.debug(f"GET {path=}, {kwargs.keys()}")
         return self._request("GET", path, **kwargs)
 
     def _post(self, path: str, **kwargs):
-        logger.debug(f"POST {path=}, {kwargs.keys()}")
         return self._request("POST", path, **kwargs)
 
     def _delete(self, path, **kwargs):
-        logger.debug(f"DELETE {path=}, {kwargs.keys()}")
         return self._request("DELETE", path, **kwargs)
 
     def _put(self, path, **kwargs):
-        logger.debug(f"PUT {path=}, {kwargs.keys()}")
         return self._request("PUT", path, **kwargs)
 
     # ==============================
     #            EDITOR
     # ==============================
 
-    def editor_list(self, template_type: TemplateType) -> dict:
+    def editor_list(self, template_type: str) -> dict:
         return self._get(f"editor/{template_type}/templates")
 
-    def editor_details(self, template_type: TemplateType, template_uuid: str) -> dict:
+    def editor_details(self, template_type: str, template_uuid: str) -> dict:
         return self._get(f"editor/{template_type}/templates/{template_uuid}")
 
     # ==============================
@@ -191,8 +193,8 @@ class NessusAPI:
     def scans_list(self, folder_id: Union[int, None] = None, last_modification_date: Union[int, None] = None) -> dict:
         return self._get("scans", params={"folder_id": folder_id, "last_modification_date": last_modification_date})
 
-    def scans_create(self) -> dict:
-        raise NotImplementedError
+    def scans_create(self, template_uuid: str, settings: ScanCreateSettings) -> dict:
+        return self._post("/scans", data={"uuid": template_uuid, "settings": asdict(settings)})
 
     def scans_copy(self, scan_id: int, folder_id: Union[int, None] = None, name: Union[str, None] = None) -> dict:
         return self._post(f"scans/{scan_id}/copy", data={"folder_id": folder_id, "name": name})
