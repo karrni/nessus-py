@@ -372,14 +372,14 @@ class NessusAPI:
 
     def get_folder_name(self, folder_id: int) -> Optional[str]:
         """Returns the name of the folder."""
-        for folder in self.folders_list():
+        for folder in self.get_folders():
             if folder["id"] == folder_id:
                 return folder["name"]
         return None
 
     def get_folder_id(self, folder_name: str) -> Optional[int]:
         """Returns the ID of the folder."""
-        for folder in self.folders_list():
+        for folder in self.get_folders():
             if folder["name"] == folder_name:
                 return folder["id"]
         return None
@@ -428,7 +428,7 @@ class NessusAPI:
 
     def get_policy_id(self, policy_name: str) -> Optional[int]:
         """Returns the ID of the policy."""
-        for policy in self.policies_list():
+        for policy in self.get_policies():
             if policy["name"] == policy_name:
                 return policy["id"]
         return None
