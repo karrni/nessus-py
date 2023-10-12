@@ -4,7 +4,7 @@ import time
 from dataclasses import asdict
 from io import BytesIO
 from json import JSONDecodeError
-from typing import IO, Union
+from typing import IO, Optional
 from urllib.parse import urljoin
 
 import requests
@@ -17,16 +17,35 @@ logger = logging.getLogger(__name__)
 
 
 class NessusAPI:
-    def __init__(self, url: str, *, verify: bool = False):
-        # Ensure the base URL has a trailing / so urljoin works properly
+    """A Python wrapper for the Nessus API."""
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        access_key: Optional[str] = None,
+        secret_key: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        verify: bool = False,
+    ):
+        # Ensure the base URL has a trailing /
         if not url.endswith("/"):
             url = f"{url}/"
 
-        self.url = url
+        # Nessus
+        self.base_url = url
         self._verify = verify
-        self._is_authenticated = False
-
         self.__session = None
+
+        # Authentication
+        self._authenticated = False
+
+        self._access_key = access_key
+        self._secret_key = secret_key
+
+        self._username = username
+        self._password = password
 
     @property
     def _session(self):
@@ -34,59 +53,53 @@ class NessusAPI:
             logger.debug("Initializing session")
             self.__session = requests.Session()
             self.__session.verify = self._verify
-            self._add_api_token()
+            self.__session.headers["X-API-Token"] = self._get_api_token()
         return self.__session
 
-    def _add_api_token(self):
+    def _get_api_token(self):
+        """Extracts the API token from the 'nessus6.js' file."""
+
         logger.debug("Fetching API token from 'nessus6.js'")
 
-        js_url = urljoin(self.url, "nessus6.js")
+        js_url = urljoin(self.base_url, "nessus6.js")
         js_text = self._session.get(js_url).text
 
         uuid_pattern = r"[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}"
+
+        # The token is a UUID and hard-coded in the getApiToken() function
         token_pattern = rf'getApiToken"[^"]+"({uuid_pattern})'
 
         match = re.search(token_pattern, js_text)
         if not match:
             raise NessusException("Couldn't parse API token from nessus6.js")
 
-        self._session.headers["X-API-Token"] = match.group(1)
+        return match.group(1)
 
-    # ==============================
-    #         AUTHENTICATION
-    # ==============================
+    def _authenticate(self):
+        """Authenticate the instance using the api keys or credentials."""
 
-    @classmethod
-    def with_keys(cls, url: str, access_key: str, secret_key: str, *, verify: bool = False) -> "NessusAPI":
-        instance = cls(url, verify=verify)
-        instance.add_keys(access_key, secret_key)
-        return instance
+        if self._access_key and self._secret_key:
+            logger.debug("Authenticating using API keys")
+            self._session.headers["X-ApiKeys"] = f"accessKey={self._access_key}; secretKey={self._secret_key}"
+            self._authenticated = True
 
-    @classmethod
-    def with_credentials(cls, url: str, username: str, password: str, *, verify: bool = False) -> "NessusAPI":
-        instance = cls(url, verify=verify)
-        instance.add_credentials(username, password)
-        return instance
+        elif self._username and self._password:
+            logger.debug("Authenticating using credentials")
+            response = self.session_create(self._username, self._password)
+            self._session.headers["X-Cookie"] = f"token={response['token']}"
+            self._authenticated = True
 
-    def add_keys(self, access_key: str, secret_key: str):
-        self._session.headers["X-ApiKeys"] = f"accessKey={access_key}; secretKey={secret_key}"
-        self._is_authenticated = True
-
-    def add_credentials(self, username: str, password: str):
-        response = self.session_create(username, password)
-        self._session.headers["X-Cookie"] = f"token={response['token']}"
-        self._is_authenticated = True
+        else:
+            raise NessusException("Either API keys or credentials must be provided before making a request")
 
     # ==============================
     #            REQUESTS
     # ==============================
 
-    def _check_authentication(self):
-        if not self._is_authenticated:
-            raise NessusException("NessusAPI instance is not authenticated")
-
     @staticmethod
     def _check_response(response: requests.Response):
+        """Checks the response for errors."""
+
         # Check if the response code is 400 or above which indicates an error
         if not response.ok:
             try:
@@ -104,24 +117,25 @@ class NessusAPI:
         self,
         method: str,
         path: str,
-        params: Union[dict, None] = None,
-        data: Union[dict, None] = None,
-        headers: Union[dict, None] = None,
-        files: Union[dict, None] = None,
+        params: Optional[dict] = None,
+        data: Optional[dict] = None,
+        headers: Optional[dict] = None,
+        files: Optional[dict] = None,
         *,
         is_json: bool = True,
         download: bool = False,
         check_auth: bool = True,
     ):
-        if check_auth:
-            self._check_authentication()
+        # Ensure the session was properly authenticated
+        if check_auth and not self._authenticated:
+            self._authenticate()
 
-        # Log only the keys of params and data
+        # Log only the keys of 'params' and 'data' to avoid leaks in logs
         _params = list(params.keys()) if params else None
         _data = list(data.keys()) if data else None
         logger.debug(f"{method} {path}, params={_params} data={_data}")
 
-        url = urljoin(self.url, path)
+        url = urljoin(self.base_url, path)
 
         # Set the content type to JSON if the request 'is_json', no files are
         # sent with it, and no headers were explicitly passed.
@@ -190,13 +204,13 @@ class NessusAPI:
     #             SCANS
     # ==============================
 
-    def scans_list(self, folder_id: Union[int, None] = None, last_modification_date: Union[int, None] = None) -> dict:
+    def scans_list(self, folder_id: Optional[int] = None, last_modification_date: Optional[int] = None) -> dict:
         return self._get("scans", params={"folder_id": folder_id, "last_modification_date": last_modification_date})
 
     def scans_create(self, template_uuid: str, settings: ScanCreateSettings) -> dict:
         return self._post("/scans", data={"uuid": template_uuid, "settings": asdict(settings)})
 
-    def scans_copy(self, scan_id: int, folder_id: Union[int, None] = None, name: Union[str, None] = None) -> dict:
+    def scans_copy(self, scan_id: int, folder_id: Optional[int] = None, name: Optional[str] = None) -> dict:
         return self._post(f"scans/{scan_id}/copy", data={"folder_id": folder_id, "name": name})
 
     def scans_delete(self, scan_id: int) -> dict:
@@ -208,29 +222,29 @@ class NessusAPI:
     def scans_delete_history(self, scan_id: int, history_id: int) -> dict:
         return self._delete(f"scans/{scan_id}/history/{history_id}")
 
-    def scans_details(self, scan_id: int, history_id: Union[int, None] = None, limit: Union[int, None] = None) -> dict:
+    def scans_details(self, scan_id: int, history_id: Optional[int] = None, limit: Optional[int] = None) -> dict:
         return self._get(f"scans/{scan_id}", params={"history_id": history_id, "limit": limit})
 
-    def scans_host_details(self, scan_id: int, host_id: int, history_id: Union[int, None] = None) -> dict:
+    def scans_host_details(self, scan_id: int, host_id: int, history_id: Optional[int] = None) -> dict:
         return self._get(f"scans/{scan_id}/hosts/{host_id}", params={"history_id": history_id})
 
-    def scans_plugin_details(self, scan_id: int, plugin_id: int, history_id: Union[int, None] = None) -> dict:
+    def scans_plugin_details(self, scan_id: int, plugin_id: int, history_id: Optional[int] = None) -> dict:
         # undocumented
         return self._get(f"scans/{scan_id}/plugins/{plugin_id}", params={"history_id": history_id})
 
-    def scans_compliance_details(self, scan_id: int, plugin_id: int, history_id: Union[int, None] = None) -> dict:
+    def scans_compliance_details(self, scan_id: int, plugin_id: int, history_id: Optional[int] = None) -> dict:
         # undocumented
         return self._get(f"scans/{scan_id}/compliance/{plugin_id}", params={"history_id": history_id})
 
     def scans_host_plugin_details(
-        self, scan_id: int, host_id: int, plugin_id: int, history_id: Union[int, None] = None
+        self, scan_id: int, host_id: int, plugin_id: int, history_id: Optional[int] = None
     ) -> dict:
         return self._get(f"scans/{scan_id}/hosts/{host_id}/plugins/{plugin_id}", params={"history_id": history_id})
 
-    def scans_schedule(self, scan_id: int, enabled: Union[bool, None] = None) -> dict:
+    def scans_schedule(self, scan_id: int, enabled: Optional[bool] = None) -> dict:
         return self._put(f"scans/{scan_id}/schedule", data={"enabled": enabled})
 
-    def scans_launch(self, scan_id: int, alt_targets: Union[list[str], None] = None) -> dict:
+    def scans_launch(self, scan_id: int, alt_targets: Optional[list[str]] = None) -> dict:
         return self._post(f"scans/{scan_id}/launch", data={"alt_targets": alt_targets})
 
     def scans_pause(self, scan_id: int) -> dict:
@@ -245,13 +259,13 @@ class NessusAPI:
     def scans_kill(self, scan_id: int) -> dict:
         return self._post(f"scans/{scan_id}/kill")
 
-    def scans_import(self, file: str, folder_id: Union[int, None] = None, password: Union[str, None] = None) -> dict:
+    def scans_import(self, file: str, folder_id: Optional[int] = None, password: Optional[str] = None) -> dict:
         return self._post("scans/import", data={"file": file, "folder_id": folder_id, "password": password})
 
-    def scans_export_formats(self, scan_id: int, schedule_id: Union[int, None] = None) -> dict:
+    def scans_export_formats(self, scan_id: int, schedule_id: Optional[int] = None) -> dict:
         return self._get(f"scans/{scan_id}/export/formats", params={"schedule_id": schedule_id})
 
-    def scans_export_request(self, scan_id: int, history_id: Union[int, None] = None, format: str = "nessus") -> dict:
+    def scans_export_request(self, scan_id: int, history_id: Optional[int] = None, format: str = "nessus") -> dict:
         # TODO has way more parameters
         return self._post(f"scans/{scan_id}/export", params={"history_id": history_id}, data={"format": format})
 
@@ -312,7 +326,7 @@ class NessusAPI:
     #              FILE
     # ==============================
 
-    def file_upload(self, file_name: str, file_stream: IO, no_enc: Union[int, None] = None) -> dict:
+    def file_upload(self, file_name: str, file_stream: IO, no_enc: Optional[int] = None) -> dict:
         files = {"Filedata": (file_name, file_stream)}
         return self._post("file/upload", data={"no_enc": no_enc}, files=files)
 
@@ -352,16 +366,19 @@ class NessusAPI:
 
     # --- Folders ---
 
-    def get_folders(self) -> Union[list[dict], None]:
+    def get_folders(self) -> list[dict]:
+        """Returns a list of all folders."""
         return self.folders_list()["folders"]
 
-    def get_folder_name(self, folder_id: int) -> Union[str, None]:
+    def get_folder_name(self, folder_id: int) -> Optional[str]:
+        """Returns the name of the folder."""
         for folder in self.folders_list():
             if folder["id"] == folder_id:
                 return folder["name"]
         return None
 
-    def get_folder_id(self, folder_name: str) -> Union[int, None]:
+    def get_folder_id(self, folder_name: str) -> Optional[int]:
+        """Returns the ID of the folder."""
         for folder in self.folders_list():
             if folder["name"] == folder_name:
                 return folder["id"]
@@ -369,38 +386,48 @@ class NessusAPI:
 
     # --- Scans ---
 
-    def get_scans(self) -> Union[list[dict], None]:
+    def get_scans(self) -> list[dict]:
+        """Returns a list of all scans."""
         return self.scans_list()["scans"]
 
     def get_scan_details(self, scan_id: int) -> dict:
+        """Returns the details of the scan."""
         return self.scans_details(scan_id)
 
-    def get_folder_scans(self, folder_id: int) -> Union[list[dict], None]:
+    def get_folder_scans(self, folder_id: int) -> Optional[list[dict]]:
+        """Returns a list of all scans in the folder."""
         return self.scans_list(folder_id=folder_id)["scans"]
 
     def get_scan_folder(self, scan_id: int) -> int:
+        """Returns the ID of the folder the scan is located in."""
         return self.scans_details(scan_id)["info"]["folder_id"]
 
     def get_scan_name(self, scan_id: int) -> str:
+        """Returns the name of the scan."""
         return self.scans_details(scan_id)["info"]["name"]
 
     # --- Plugins ---
 
     def get_plugin_details(self, scan_id: int, plugin_id: int) -> dict:
+        """Returns the plugin details from the scan."""
         return self.scans_plugin_details(scan_id, plugin_id)
 
     def get_compliance_details(self, scan_id: int, plugin_id: int) -> dict:
+        """Returns the compliance details from the scan."""
         return self.scans_compliance_details(scan_id, plugin_id)
 
     # --- Policies ---
 
-    def get_policies(self) -> Union[list[dict], None]:
+    def get_policies(self) -> list[dict]:
+        """Returns a list of all policies."""
         return self.policies_list()["policies"]
 
     def get_policy_uuid(self, policy_id: int) -> str:
+        """Returns the UUID of the policy."""
         return self.policies_details(policy_id)["uuid"]
 
-    def get_policy_id(self, policy_name: str) -> Union[int, None]:
+    def get_policy_id(self, policy_name: str) -> Optional[int]:
+        """Returns the ID of the policy."""
         for policy in self.policies_list():
             if policy["name"] == policy_name:
                 return policy["id"]
@@ -409,6 +436,7 @@ class NessusAPI:
     # --- Import/Export ---
 
     def import_scan(self, file_name: str, file_stream: IO, folder_id: int):
+        """Imports the scan into the folder."""
         temp_filename = self.file_upload(file_name, file_stream)["fileuploaded"]
         return self.scans_import(temp_filename, folder_id)
 
@@ -423,9 +451,11 @@ class NessusAPI:
         file_stream.seek(0)
         return file_stream
 
-    def export_merged_scan(self, scan_ids: list[int], name: Union[str, None] = None) -> BytesIO:
+    def export_merged_scan(self, scan_ids: list[int], name: Optional[str] = None) -> BytesIO:
+        """Exports multiple scans as .nessus files and merges them into one."""
         scan_export = NessusScanExport(name)
 
+        # TODO trigger all exports, then wait for them to finish
         for scan_id in scan_ids:
             scan_details = self.get_scan_details(scan_id)
 
@@ -436,5 +466,6 @@ class NessusAPI:
 
         return scan_export.get_stream()
 
-    def export_scan(self, scan_id: int, name: Union[str, None] = None) -> BytesIO:
+    def export_scan(self, scan_id: int, name: Optional[str] = None) -> BytesIO:
+        """Exports the scan as a .nessus file."""
         return self.export_merged_scan([scan_id], name)

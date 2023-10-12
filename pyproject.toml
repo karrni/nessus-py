@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nessus-py"
-version = "1.0.2"
+version = "1.1.0"
 description = "Nessus API for Python"
 authors = ["karrni <karrni@proton.me>"]
 readme = "README.md"

@@ -1,1 +1,1 @@
-Python library for interacting with Nessus.
+# Nessus API for Python
