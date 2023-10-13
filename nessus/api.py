@@ -1,7 +1,6 @@
 import logging
 import re
 import time
-from dataclasses import asdict
 from io import BytesIO
 from json import JSONDecodeError
 from typing import IO, Optional
@@ -9,9 +8,10 @@ from urllib.parse import urljoin
 
 import requests
 
+from . import constants as const
 from .exceptions import NessusException
 from .export import NessusScanExport
-from .models import ScanCreateSettings
+from .models import ScanCreateSettings, ScanFilters
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +192,8 @@ class NessusAPI:
         return self._get("folders")
 
     def folders_create(self, name: str) -> dict:
+        if len(name) > const.MAX_FOLDER_NAME_LENGTH:
+            raise NessusException(f"Folder name is too long, cannot exceed {const.MAX_FOLDER_NAME_LENGTH} characters")
         return self._post("folders", data={"name": name})
 
     def folders_edit(self, folder_id: int, name: str) -> dict:
@@ -208,7 +210,7 @@ class NessusAPI:
         return self._get("scans", params={"folder_id": folder_id, "last_modification_date": last_modification_date})
 
     def scans_create(self, template_uuid: str, settings: ScanCreateSettings) -> dict:
-        return self._post("/scans", data={"uuid": template_uuid, "settings": asdict(settings)})
+        return self._post("/scans", data={"uuid": template_uuid, "settings": settings.model_dump()})
 
     def scans_copy(self, scan_id: int, folder_id: Optional[int] = None, name: Optional[str] = None) -> dict:
         return self._post(f"scans/{scan_id}/copy", data={"folder_id": folder_id, "name": name})
@@ -222,8 +224,17 @@ class NessusAPI:
     def scans_delete_history(self, scan_id: int, history_id: int) -> dict:
         return self._delete(f"scans/{scan_id}/history/{history_id}")
 
-    def scans_details(self, scan_id: int, history_id: Optional[int] = None, limit: Optional[int] = None) -> dict:
-        return self._get(f"scans/{scan_id}", params={"history_id": history_id, "limit": limit})
+    def scans_details(
+        self,
+        scan_id: int,
+        history_id: Optional[int] = None,
+        limit: Optional[int] = None,
+        filters: Optional[ScanFilters] = None,
+    ) -> dict:
+        params = {"history_id": history_id, "limit": limit}
+        if filters is not None:
+            params.update(filters.model_dump())
+        return self._get(f"scans/{scan_id}", params=params)
 
     def scans_host_details(self, scan_id: int, host_id: int, history_id: Optional[int] = None) -> dict:
         return self._get(f"scans/{scan_id}/hosts/{host_id}", params={"history_id": history_id})
@@ -390,11 +401,11 @@ class NessusAPI:
         """Returns a list of all scans."""
         return self.scans_list()["scans"]
 
-    def get_scan_details(self, scan_id: int) -> dict:
+    def get_scan_details(self, scan_id: int, filters: Optional[ScanFilters] = None) -> dict:
         """Returns the details of the scan."""
-        return self.scans_details(scan_id)
+        return self.scans_details(scan_id, filters=filters)
 
-    def get_folder_scans(self, folder_id: int) -> Optional[list[dict]]:
+    def get_folder_scans(self, folder_id: int) -> list[dict]:
         """Returns a list of all scans in the folder."""
         return self.scans_list(folder_id=folder_id)["scans"]
 
@@ -440,31 +451,59 @@ class NessusAPI:
         temp_filename = self.file_upload(file_name, file_stream)["fileuploaded"]
         return self.scans_import(temp_filename, folder_id)
 
-    def _export_scan_item(self, scan_id: int, history_id: int) -> BytesIO:
-        token = self.scans_export_request(scan_id, history_id)["token"]
-        while self.tokens_status(token)["status"] != "ready":
-            time.sleep(2)
-
-        file_bytes = self.tokens_download(token)
-        file_stream = BytesIO()
-        file_stream.write(file_bytes)
-        file_stream.seek(0)
-        return file_stream
-
     def export_merged_scan(self, scan_ids: list[int], name: Optional[str] = None) -> BytesIO:
         """Exports multiple scans as .nessus files and merges them into one."""
-        scan_export = NessusScanExport(name)
 
-        # TODO trigger all exports, then wait for them to finish
+        exported_scan = NessusScanExport(name)
+
+        tokens = []
+
+        # Trigger all exports and collect the tokens
         for scan_id in scan_ids:
             scan_details = self.get_scan_details(scan_id)
 
             for history_item in scan_details["history"]:
-                if history_item["status"] in ("completed", "imported", "canceled"):
-                    export_item = self._export_scan_item(scan_id, history_item["history_id"])
-                    scan_export.add_scan(export_item)
+                history_id = history_item["history_id"]
 
-        return scan_export.get_stream()
+                logger.debug(f"Triggering export of '{scan_id=}, {history_id=}'")
+
+                token = self.scans_export_request(scan_id, history_id)["token"]
+                tokens.append((token, scan_id, history_id))
+
+        # Wait for each token to be ready, then download and merge them
+        for token, scan_id, history_id in tokens:
+            wait_time = 0
+            timed_out = False
+
+            logger.debug(f"Downloading export of '{scan_id=}, {history_id=}'")
+
+            while True:
+                status = self.tokens_status(token)["status"]
+                if status == "ready":
+                    break
+
+                # Break out of the infinite loop and set the timeout flag
+                if wait_time >= const.MAX_EXPORT_WAIT_TIME:
+                    timed_out = True
+                    break
+
+                logger.debug(f"Export of '{scan_id=}, {history_id=}' not ready, waiting")
+                time.sleep(const.EXPORT_WAIT_INTERVAL)
+                wait_time += const.EXPORT_WAIT_INTERVAL
+
+            # Skip if the download timed out
+            if timed_out:
+                logger.error(f"Export of '{scan_id=}, {history_id=}' timed out, skipping")
+                continue
+
+            # Write the scan data to a stream and add it to the export
+            curr_data = self.tokens_download(token)
+            curr_stream = BytesIO(curr_data)
+            curr_stream.seek(0)
+
+            exported_scan.add_scan(curr_stream)
+
+        return exported_scan.get_stream()
 
     def export_scan(self, scan_id: int, name: Optional[str] = None) -> BytesIO:
         """Exports the scan as a .nessus file."""
