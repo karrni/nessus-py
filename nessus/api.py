@@ -1,6 +1,7 @@
 import logging
 import re
 import time
+from functools import wraps
 from io import BytesIO
 from json import JSONDecodeError
 from typing import IO, Optional
@@ -14,6 +15,16 @@ from .export import NessusScanExport
 from .models import ScanCreateSettings, ScanFilters
 
 logger = logging.getLogger(__name__)
+
+
+def locked(method):
+    @wraps(method)
+    def wrapper(instance, *args, **kwargs):
+        if not instance._unlocked:
+            instance._unlock()
+        return method(instance, *args, **kwargs)
+
+    return wrapper
 
 
 class NessusAPI:
@@ -40,6 +51,7 @@ class NessusAPI:
 
         # Authentication
         self._authenticated = False
+        self._unlocked = False
 
         self._access_key = access_key
         self._secret_key = secret_key
@@ -53,14 +65,14 @@ class NessusAPI:
             logger.debug("Initializing session")
             self.__session = requests.Session()
             self.__session.verify = self._verify
-            self.__session.headers["X-API-Token"] = self._get_api_token()
         return self.__session
 
-    def _get_api_token(self):
+    def _unlock(self):
         """Extracts the API token from the 'nessus6.js' file."""
 
-        logger.debug("Fetching API token from 'nessus6.js'")
+        logger.info("Fetching API token, may take a sec")
 
+        logger.debug("Fetching 'nessus6.js'")
         js_url = urljoin(self.base_url, "nessus6.js")
         js_text = self._session.get(js_url).text
 
@@ -73,7 +85,9 @@ class NessusAPI:
         if not match:
             raise NessusException("Couldn't parse API token from nessus6.js")
 
-        return match.group(1)
+        self._session.headers["X-API-Token"] = match.group(1)
+
+        self._unlocked = True
 
     def _authenticate(self):
         """Authenticate the instance using the api keys or credentials."""
@@ -209,18 +223,23 @@ class NessusAPI:
     def scans_list(self, folder_id: Optional[int] = None, last_modification_date: Optional[int] = None) -> dict:
         return self._get("scans", params={"folder_id": folder_id, "last_modification_date": last_modification_date})
 
+    @locked
     def scans_create(self, template_uuid: str, settings: ScanCreateSettings) -> dict:
         return self._post("/scans", data={"uuid": template_uuid, "settings": settings.model_dump()})
 
+    @locked
     def scans_copy(self, scan_id: int, folder_id: Optional[int] = None, name: Optional[str] = None) -> dict:
         return self._post(f"scans/{scan_id}/copy", data={"folder_id": folder_id, "name": name})
 
+    @locked
     def scans_delete(self, scan_id: int) -> dict:
         return self._delete(f"scans/{scan_id}")
 
+    @locked
     def scans_delete_bulk(self, ids: list[int]) -> dict:
         return self._delete("scans", data={"ids": ids})
 
+    @locked
     def scans_delete_history(self, scan_id: int, history_id: int) -> dict:
         return self._delete(f"scans/{scan_id}/history/{history_id}")
 
@@ -252,24 +271,31 @@ class NessusAPI:
     ) -> dict:
         return self._get(f"scans/{scan_id}/hosts/{host_id}/plugins/{plugin_id}", params={"history_id": history_id})
 
+    @locked
     def scans_schedule(self, scan_id: int, enabled: Optional[bool] = None) -> dict:
         return self._put(f"scans/{scan_id}/schedule", data={"enabled": enabled})
 
+    @locked
     def scans_launch(self, scan_id: int, alt_targets: Optional[list[str]] = None) -> dict:
         return self._post(f"scans/{scan_id}/launch", data={"alt_targets": alt_targets})
 
+    @locked
     def scans_pause(self, scan_id: int) -> dict:
         return self._post(f"scans/{scan_id}/pause")
 
+    @locked
     def scans_resume(self, scan_id: int) -> dict:
         return self._post(f"scans/{scan_id}/resume")
 
+    @locked
     def scans_stop(self, scan_id: int) -> dict:
         return self._post(f"scans/{scan_id}/stop")
 
+    @locked
     def scans_kill(self, scan_id: int) -> dict:
         return self._post(f"scans/{scan_id}/kill")
 
+    @locked
     def scans_import(self, file: str, folder_id: Optional[int] = None, password: Optional[str] = None) -> dict:
         return self._post("scans/import", data={"file": file, "folder_id": folder_id, "password": password})
 
